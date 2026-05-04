@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Sadia vs Tonmoy</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -39,6 +39,8 @@
         0 20px 50px rgba(0, 0, 0, 0.6);
       background: #050508;
       cursor: default;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
     }
     #hud {
       display: flex;
@@ -95,6 +97,25 @@
       cursor: pointer;
     }
     #overlay button:hover { filter: brightness(1.08); }
+    #pauseBtn {
+      margin-top: 10px;
+      font-family: inherit;
+      font-size: 0.7rem;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 12px 22px;
+      min-height: 44px;
+      min-width: 88px;
+      border-radius: 6px;
+      border: 1px solid rgba(0, 255, 200, 0.35);
+      background: rgba(12, 20, 28, 0.9);
+      color: #8a9bb0;
+      cursor: pointer;
+    }
+    #pauseBtn:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -106,7 +127,8 @@
       <span>Lives <strong id="lives">3</strong></span>
       <span>Wave <strong id="wave">1</strong></span>
     </div>
-    <p id="help">Move: ← → or A D · Fire: Space · Pause: P · Open this file in your browser to play</p>
+    <button type="button" id="pauseBtn" disabled>Pause</button>
+    <p id="help">Desktop: ← → or A D · Space to fire · P to pause · Touch: drag on the game to move &amp; auto-fire</p>
   </div>
   <div id="overlay" class="visible">
     <div class="card">
@@ -128,6 +150,7 @@
   const overlayTitle = document.getElementById("overlayTitle");
   const overlayText = document.getElementById("overlayText");
   const startBtn = document.getElementById("startBtn");
+  const pauseBtn = document.getElementById("pauseBtn");
 
   const W = canvas.width;
   const H = canvas.height;
@@ -188,6 +211,9 @@
   }
 
   let keys = Object.create(null);
+  /** Touch slide-to-move: horizontal position in game px, or null if not steering. */
+  let touchSteerX = null;
+  let touchPointerId = null;
   let score = 0;
   let lives = 3;
   let wave = 1;
@@ -269,6 +295,8 @@
     spawnTimer = 0;
     fireCooldown = 0;
     nextWaveScore = 200;
+    touchSteerX = null;
+    touchPointerId = null;
     updateHud();
   }
 
@@ -342,12 +370,20 @@
 
     const left = keys["ArrowLeft"] || keys["a"] || keys["A"];
     const right = keys["ArrowRight"] || keys["d"] || keys["D"];
-    const fire = keys[" "] || keys["Spacebar"];
+    const touchAiming = touchSteerX !== null;
+    const fire =
+      keys[" "] ||
+      keys["Spacebar"] ||
+      (playing && touchAiming);
 
-    let dx = 0;
-    if (left) dx -= 1;
-    if (right) dx += 1;
-    player.x += dx * player.speed * dt;
+    if (touchSteerX !== null) {
+      player.x = touchSteerX;
+    } else {
+      let dx = 0;
+      if (left) dx -= 1;
+      if (right) dx += 1;
+      player.x += dx * player.speed * dt;
+    }
     player.x = Math.max(player.w / 2, Math.min(W - player.w / 2, player.x));
 
     fireCooldown -= dt;
@@ -484,6 +520,9 @@
 
   function gameOver() {
     playing = false;
+    touchSteerX = null;
+    touchPointerId = null;
+    pauseBtn.disabled = true;
     overlayTitle.textContent = "Game over";
     overlayText.textContent = "Final score: " + score + " · Wave " + wave;
     startBtn.textContent = "Play again";
@@ -610,6 +649,11 @@
     if (e.key === "p" || e.key === "P") {
       if (playing) {
         paused = !paused;
+        if (paused) {
+          touchSteerX = null;
+          touchPointerId = null;
+        }
+        pauseBtn.textContent = paused ? "Resume" : "Pause";
         e.preventDefault();
       }
     }
@@ -617,6 +661,65 @@
   });
   window.addEventListener("keyup", (e) => {
     keys[e.key] = false;
+  });
+
+  function clampPlayerX(gameX) {
+    return Math.max(player.w / 2, Math.min(W - player.w / 2, gameX));
+  }
+
+  function gameXFromClient(clientX) {
+    const r = canvas.getBoundingClientRect();
+    const sx = W / r.width;
+    return (clientX - r.left) * sx;
+  }
+
+  function clearTouchPointer(e) {
+    if (touchPointerId !== null && e.pointerId === touchPointerId) {
+      touchPointerId = null;
+      touchSteerX = null;
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+    }
+  }
+
+  canvas.addEventListener(
+    "pointerdown",
+    function (e) {
+      if (!playing || paused) return;
+      if (e.pointerType !== "touch") return;
+      if (e.button !== 0) return;
+      touchPointerId = e.pointerId;
+      touchSteerX = clampPlayerX(gameXFromClient(e.clientX));
+      try {
+        canvas.setPointerCapture(e.pointerId);
+      } catch (_) {}
+      e.preventDefault();
+    },
+    { passive: false }
+  );
+
+  canvas.addEventListener(
+    "pointermove",
+    function (e) {
+      if (e.pointerId !== touchPointerId || touchPointerId === null) return;
+      touchSteerX = clampPlayerX(gameXFromClient(e.clientX));
+      e.preventDefault();
+    },
+    { passive: false }
+  );
+
+  canvas.addEventListener("pointerup", clearTouchPointer);
+  canvas.addEventListener("pointercancel", clearTouchPointer);
+  canvas.addEventListener("lostpointercapture", function (e) {
+    if (e.pointerId === touchPointerId) {
+      touchPointerId = null;
+      touchSteerX = null;
+    }
+  });
+
+  canvas.addEventListener("contextmenu", function (e) {
+    e.preventDefault();
   });
 
   startBtn.addEventListener("click", () => {
@@ -627,7 +730,19 @@
     resetGame();
     playing = true;
     paused = false;
+    pauseBtn.disabled = false;
+    pauseBtn.textContent = "Pause";
     lastTs = performance.now();
+  });
+
+  pauseBtn.addEventListener("click", function () {
+    if (!playing) return;
+    paused = !paused;
+    if (paused) {
+      touchSteerX = null;
+      touchPointerId = null;
+    }
+    pauseBtn.textContent = paused ? "Resume" : "Pause";
   });
 
   initStars();
