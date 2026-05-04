@@ -156,34 +156,139 @@
   const H = canvas.height;
   const FIELD_MARGIN = 24;
 
-  const URL_PLAYER = "sadia.png";
-  const URL_ENEMY = "tonmoy.png";
+  /** Same passphrase as tools/encrypt-images.mjs (PNG → .enc). Client-side decrypt is obfuscation only — anyone can read this key in DevTools. */
+  const ASSET_KEY =
+    "NrU0QOYePGMBhlMIFwFIqgCLNhhOMtdDOQWR8Erz_jmMVXT5PH1wFw";
+  const URL_PLAYER_ENC = "sadia.enc";
+  const URL_ENEMY_ENC = "tonmoy.enc";
+  const URL_PLAYER_PNG = "sadia.png";
+  const URL_ENEMY_PNG = "tonmoy.png";
   const imgPlayer = new Image();
   const imgEnemy = new Image();
   let spritesReady = false;
 
-  function loadSprites() {
-    function wait(img) {
-      return new Promise(function (resolve) {
-        function settle(ok) {
-          resolve(!!ok && !!img.naturalWidth);
-        }
-        if (img.complete) settle(img.naturalWidth);
-        else {
-          img.onload = function () {
-            settle(img.naturalWidth);
-          };
-          img.onerror = function () {
-            settle(false);
-          };
-        }
+  function resolveAsset(filename) {
+    return new URL(filename, window.location.href).href;
+  }
+
+  async function deriveAesKey(passphrase, saltBuf) {
+    const enc = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      enc.encode(passphrase),
+      { name: "PBKDF2" },
+      false,
+      ["deriveBits"]
+    );
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        salt: saltBuf,
+        iterations: 100000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      256
+    );
+    return crypto.subtle.importKey(
+      "raw",
+      bits,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["decrypt"]
+    );
+  }
+
+  async function decryptEncBuffer(ab) {
+    const buf = new Uint8Array(ab);
+    if (buf.length < 48) throw new Error("short");
+    const magic = String.fromCharCode(buf[0], buf[1], buf[2], buf[3]);
+    if (magic !== "ENC1") throw new Error("magic");
+    const salt = new Uint8Array(buf.slice(4, 20));
+    const iv = new Uint8Array(buf.slice(20, 32));
+    const tag = buf.slice(buf.length - 16);
+    const ct = buf.slice(32, buf.length - 16);
+    const combined = new Uint8Array(ct.length + tag.length);
+    combined.set(ct, 0);
+    combined.set(tag, ct.length);
+    const key = await deriveAesKey(ASSET_KEY, salt);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv, tagLength: 128 },
+      key,
+      combined
+    );
+    return new Blob([decrypted], { type: "image/png" });
+  }
+
+  async function setImageFromBlob(img, blob) {
+    const u = URL.createObjectURL(blob);
+    img.src = u;
+    if (typeof img.decode === "function") {
+      await img.decode();
+    } else {
+      await new Promise(function (resolve, reject) {
+        img.onload = function () {
+          resolve();
+        };
+        img.onerror = function () {
+          reject(new Error("img"));
+        };
       });
     }
-    imgPlayer.src = URL_PLAYER;
-    imgEnemy.src = URL_ENEMY;
-    Promise.all([wait(imgPlayer), wait(imgEnemy)]).then(function (ok) {
-      spritesReady = ok[0] && ok[1];
-    });
+    /* Keep blob URLs for the session — revoking immediately after load breaks drawImage on some WebKit builds. */
+  }
+
+  async function loadSpritesFromPlainPng() {
+    const [resP, resE] = await Promise.all([
+      fetch(resolveAsset(URL_PLAYER_PNG), { cache: "no-store" }),
+      fetch(resolveAsset(URL_ENEMY_PNG), { cache: "no-store" }),
+    ]);
+    if (!resP.ok || !resE.ok) throw new Error("fetch png");
+    const [blobP, blobE] = await Promise.all([resP.blob(), resE.blob()]);
+    await Promise.all([
+      setImageFromBlob(imgPlayer, blobP),
+      setImageFromBlob(imgEnemy, blobE),
+    ]);
+    spritesReady = !!imgPlayer.naturalWidth && !!imgEnemy.naturalWidth;
+  }
+
+  async function loadSpritesFromEnc() {
+    const [resP, resE] = await Promise.all([
+      fetch(resolveAsset(URL_PLAYER_ENC), { cache: "no-store" }),
+      fetch(resolveAsset(URL_ENEMY_ENC), { cache: "no-store" }),
+    ]);
+    if (!resP.ok || !resE.ok) throw new Error("fetch enc");
+    const [abP, abE] = await Promise.all([
+      resP.arrayBuffer(),
+      resE.arrayBuffer(),
+    ]);
+    const [blobP, blobE] = await Promise.all([
+      decryptEncBuffer(abP),
+      decryptEncBuffer(abE),
+    ]);
+    await Promise.all([
+      setImageFromBlob(imgPlayer, blobP),
+      setImageFromBlob(imgEnemy, blobE),
+    ]);
+    spritesReady = !!imgPlayer.naturalWidth && !!imgEnemy.naturalWidth;
+  }
+
+  async function loadSprites() {
+    const canDecrypt = !!(window.crypto && window.crypto.subtle);
+    try {
+      if (canDecrypt) await loadSpritesFromEnc();
+      else await loadSpritesFromPlainPng();
+    } catch (_) {
+      if (canDecrypt) {
+        try {
+          await loadSpritesFromPlainPng();
+        } catch (_) {
+          spritesReady = false;
+        }
+      } else {
+        spritesReady = false;
+      }
+    }
   }
 
   /** Enemy position: `x` = horizontal center, `y` = top of hit box. */
